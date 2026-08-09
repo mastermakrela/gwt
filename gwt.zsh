@@ -1,5 +1,12 @@
 # Git worktree helpers: gwt / gwtc / gws (+ completions)
-# Sourced from ~/.zshrc. Lives in ~/Scripts so it can be versioned.
+# Sourced from ~/.zshrc. Lives in ~/Scripts/gwt (own git repo) so it can be versioned.
+#
+# NOTE: helper functions callable at runtime (gwt_bootstrap) must NOT start
+# with an underscore — Claude Code shell snapshots drop single-underscore
+# function *definitions* while keeping call sites, which breaks under any
+# agent shell. See README.md GOTCHA section. _gwt / _gws are fine: they are
+# zsh completion functions, only ever invoked via `compdef`, never called
+# directly by this script.
 #
 # gwt bootstraps every new worktree: worktrees carry only tracked files, so
 # untracked .env* / .dev.vars* are copied over from the source worktree
@@ -8,7 +15,7 @@
 # `secretspec check` instead of relying on copied dotenv files alone.
 
 # Copy untracked env files from the source worktree into a fresh one
-_gwt_bootstrap() {
+gwt_bootstrap() {
   local src="$1" dst="$2"
   local f rel copied=0
   local -a env_files
@@ -133,7 +140,7 @@ gwt() {
   fi
 
   # Worktrees carry only tracked files — copy env files etc. from this worktree
-  _gwt_bootstrap "$repo_root" "$worktree_path"
+  gwt_bootstrap "$repo_root" "$worktree_path"
 }
 
 # Zsh completion for gwt (includes both local and remote branches)
