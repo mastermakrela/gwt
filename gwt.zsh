@@ -47,7 +47,8 @@ gwt_bootstrap() {
     fi
   fi
 
-  echo "Remember: install deps (bun install / fvm flutter pub get) and run codegen if the repo needs it."
+  echo "Note: gwt only copied env files/secrets — it does NOT install deps, init submodules, or run codegen."
+  echo "If the repo needs them: bun install / fvm flutter pub get, git submodule update --init, svelte-kit sync / wrangler types / paraglide compile."
 }
 
 # Create git worktree next to repo root
@@ -159,8 +160,11 @@ _gwt() {
   _describe 'branch' branches
 }
 
-# Register completion (guarded: compdef only exists after compinit)
-(( $+functions[compdef] )) && compdef _gwt gwt
+# Register completion. Guard on BOTH compdef and _comps: Claude Code shell snapshots
+# capture the compdef function but not the _comps table compinit creates, so a bare
+# compdef call there dies with "_comps: assignment to invalid subscript range" and
+# aborts the rest of this file (gwtc/gws never get defined).
+(( $+functions[compdef] && $+_comps )) && compdef _gwt gwt
 
 # Cleanup merged worktrees, but protect worktrees with uncommitted changes
 #
@@ -444,7 +448,7 @@ _gws() {
   _describe 'branch' branches
 }
 
-(( $+functions[compdef] )) && compdef _gws gws
+(( $+functions[compdef] && $+_comps )) && compdef _gws gws
 
 # Ensure sourcing this file does not leak a non-zero exit status
 true

@@ -91,3 +91,21 @@ only ever invoked through `compdef` (itself guarded by
 `(( $+functions[compdef] ))`), never called directly by this script, so
 losing them under a snapshot-sourced agent shell is harmless (you just lose
 tab-completion, which doesn't exist in a non-interactive shell anyway).
+
+## GOTCHA: `compdef` exists in the snapshot, `_comps` does not
+
+The same snapshot captures the `compdef` *function* (because `compinit` ran
+in the interactive shell), but not the `_comps` associative array that
+`compinit` creates. So inside an agent shell `(( $+functions[compdef] ))`
+is true, `compdef _gwt gwt` runs, and dies with
+
+```
+compdef:153: _comps: assignment to invalid subscript range
+```
+
+That is a fatal error for the sourced file: everything after the first
+`compdef` line (`gwtc`, `gws`, `_gws`) is never defined and `source` returns
+126, so `source ~/Scripts/gwt/gwt.zsh && gwt …` never reaches `gwt`.
+
+**Rule going forward:** guard completion registration on both:
+`(( $+functions[compdef] && $+_comps )) && compdef …`.
