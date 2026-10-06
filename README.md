@@ -5,7 +5,7 @@ completion functions `_gwt` / `_gws`.
 
 ## Commands
 
-### `gwt <branch-name> [custom-worktree-name]`
+### `gwt [-y|--yes] <branch-name> [custom-worktree-name]`
 
 Create a git worktree from an existing local or remote branch, placed next
 to the repo root as `../<repo>-<branch>` (or `../<repo>-<custom-name>` if
@@ -13,17 +13,24 @@ given). Examples from the script's own usage text:
 
 ```
 gwt origin/feature-branch    # Create worktree from remote branch
-gwt feature-branch           # Create worktree from existing local branch
+gwt feature-branch           # Local branch, or origin/feature-branch if only on origin
 ```
 
 - A remote branch (`origin/foo`) creates a new local tracking branch `foo`.
-- If that local branch already exists, you're prompted whether to reuse it.
+  A bare name that exists only as `origin/foo` falls back to it automatically.
+- If that local branch already exists: with `-y` it is reused; on a TTY you're
+  prompted; without a TTY (agent shells) it is reused if it is at, behind, or
+  ahead of the remote, and gwt aborts if the two have diverged.
 - After creating the worktree, `gwt_bootstrap` runs automatically: it copies
-  any untracked `.env*` / `.dev.vars*` files from the source worktree into
-  the new one (skipping paths that already exist, `node_modules`, and
-  `.git`), and if the repo has a `secretspec.toml` and the `secretspec` CLI
-  is installed, runs `secretspec check` instead of/in addition to relying on
-  copied dotenv files.
+  gitignored `.env*` / `.dev.vars*` files from the source worktree (via
+  `git ls-files --others --ignored`, so tracked templates, submodules and nested
+  checkouts like `.claude/worktrees/*` are never touched; `*.example` is
+  skipped). A file is only copied if its directory exists on the new branch —
+  otherwise it is listed as skipped. If the repo has a `secretspec.toml` and
+  the `secretspec` CLI is installed, it runs `secretspec check` instead of/in
+  addition to relying on copied dotenv files.
+- If the root has no `package.json` / `pubspec.yaml` / `pyproject.toml` but
+  exactly one subdirectory does, gwt prints where the workspace lives.
 - It does **not** install dependencies or run codegen — you still need
   `bun install` / `fvm flutter pub get` and any codegen step yourself.
 

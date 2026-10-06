@@ -9,32 +9,46 @@
 # directly by this script.
 #
 # gwt bootstraps every new worktree: worktrees carry only tracked files, so
-# untracked .env* / .dev.vars* are copied over from the source worktree
-# (skipping paths that already exist, node_modules and .git). If the repo has
+# gitignored .env* / .dev.vars* files are copied over from the source worktree.
+# They are enumerated with `git ls-files --others --ignored`, which never lists
+# tracked templates and never descends into submodules or nested checkouts
+# (.claude/worktrees/agent-*); *.example files are skipped, and a file is only
+# copied when its directory already exists in the new worktree. If the repo has
 # a secretspec.toml (https://secretspec.dev) and the CLI is installed, it runs
 # `secretspec check` instead of relying on copied dotenv files alone.
 
-# Copy untracked env files from the source worktree into a fresh one
+# Copy gitignored env files from the source worktree into a fresh one
 gwt_bootstrap() {
+  emulate -L zsh
   local src="$1" dst="$2"
-  local f rel copied=0
-  local -a env_files
-  env_files=(${(f)"$(command find "$src" \
-    \( -name node_modules -o -name .git \) -prune -o \
-    \( -name '.env*' -o -name '.dev.vars*' \) -type f -print 2>/dev/null)"})
+  local rel sm copied=0 skipped=0
+  local -a submodules
+  # `git submodule status` lines: "<flag><sha> <path> [(<describe>)]"
+  submodules=(${(f)"$(git -C "$src" submodule status 2>/dev/null | awk '{print $2}')"})
 
-  for f in "${env_files[@]}"; do
-    [[ -z "$f" ]] && continue
-    rel="${f#$src/}"
-    [[ -e "$dst/$rel" ]] && continue   # tracked files are already there
-    mkdir -p "$dst/${rel:h}"
-    if cp "$f" "$dst/$rel"; then
+  while IFS= read -r -d '' rel; do
+    [[ -z "$rel" || "$rel" == */ ]] && continue          # nested repos are listed as "dir/"
+    [[ "$rel" == .claude/worktrees/* || "$rel" == */.claude/worktrees/* ]] && continue
+    for sm in "${submodules[@]}"; do
+      [[ -n "$sm" && ( "$rel" == "$sm" || "$rel" == "$sm"/* ) ]] && continue 2
+    done
+    [[ "${rel:t}" == .env* || "${rel:t}" == .dev.vars* ]] || continue
+    [[ "${rel:t}" == *.example ]] && continue
+    [[ -f "$src/$rel" ]] || continue
+    [[ -e "$dst/$rel" ]] && continue
+    if [[ ! -d "$dst/${rel:h}" ]]; then
+      echo "  env skipped (no '${rel:h}/' on this branch): $rel"
+      (( skipped++ ))
+      continue
+    fi
+    if cp "$src/$rel" "$dst/$rel"; then
       echo "  env: $rel"
       (( copied++ ))
     fi
-  done
-  if (( copied > 0 )); then
-    echo "Bootstrapped: copied $copied env file(s) from $(basename "$src")"
+  done < <(git -C "$src" ls-files --others --ignored --exclude-standard -z 2>/dev/null)
+
+  if (( copied > 0 || skipped > 0 )); then
+    echo "Bootstrapped: copied $copied env file(s) from $(basename "$src"), skipped $skipped"
   fi
 
   if [[ -f "$dst/secretspec.toml" ]]; then
@@ -51,17 +65,46 @@ gwt_bootstrap() {
   echo "If the repo needs them: bun install / fvm flutter pub get, git submodule update --init, svelte-kit sync / wrangler types / paraglide compile."
 }
 
+# If the worktree root has no package.json/pubspec.yaml/pyproject.toml but exactly
+# one first-level subdirectory does, say where the workspace actually lives
+gwt_workspace_hint() {
+  local wt="$1" m
+  for m in package.json pubspec.yaml pyproject.toml; do
+    [[ -f "$wt/$m" ]] && return 0
+  done
+  local -a dirs
+  dirs=(${(fu)"$(command find "$wt" -mindepth 2 -maxdepth 2 -not -path '*/.git/*' \
+    \( -name package.json -o -name pubspec.yaml -o -name pyproject.toml \) \
+    -exec dirname {} \; 2>/dev/null)"})
+  if (( ${#dirs} == 1 )) && [[ -n "${dirs[1]}" ]]; then
+    echo "Note: workspace lives in ${dirs[1]#$wt/}/ — run installs/codegen there, not at the worktree root."
+  fi
+}
+
 # Create git worktree next to repo root
 gwt() {
-  local branch="$1"
-  local custom_name="$2"
-  
+  local yes=0 branch="" custom_name=""
+  local -a positional
+  while (( $# > 0 )); do
+    case "$1" in
+      -y|--yes) yes=1 ;;
+      -*) positional=(); break ;;   # unknown flag -> usage
+      *) positional+=("$1") ;;
+    esac
+    shift
+  done
+  branch="${positional[1]}"
+  custom_name="${positional[2]}"
+
   if [[ -z "$branch" ]]; then
-    echo "Usage: gwt <branch-name> [custom-worktree-name]"
+    echo "Usage: gwt [-y|--yes] <branch-name> [custom-worktree-name]"
     echo ""
     echo "Examples:"
     echo "  gwt origin/feature-branch    # Create worktree from remote branch"
-    echo "  gwt feature-branch           # Create worktree from existing local branch"
+    echo "  gwt feature-branch           # Local branch, or origin/feature-branch if only on origin"
+    echo ""
+    echo "  -y, --yes   If origin/<b> is given and local <b> exists, reuse it without asking."
+    echo "              Without a TTY it is reused automatically unless it has diverged."
     return 1
   fi
   
@@ -91,25 +134,48 @@ gwt() {
     # Remote-tracking branch: strip the remote name (first path component)
     is_remote=1
     branch_name="${branch#*/}"
+  elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    # Only on origin: fall back to it and create the local tracking branch
+    echo "Branch '$branch' not found locally — using origin/$branch"
+    is_remote=1
+    branch="origin/$branch"
   else
     echo "Error: Branch '$branch' not found"
     echo "Available branches:"
     git branch -a | grep -v HEAD | head -20
     return 1
   fi
-  
+
   # Check if local branch already exists when using remote
-  if [[ $is_remote -eq 1 ]]; then
-    if git rev-parse --verify --quiet "$branch_name" >/dev/null 2>&1; then
-      echo "Local branch '$branch_name' already exists."
+  if [[ $is_remote -eq 1 ]] && git show-ref --verify --quiet "refs/heads/$branch_name"; then
+    echo "Local branch '$branch_name' already exists."
+    if (( yes )); then
+      echo "Reusing local branch '$branch_name' (--yes)."
+    elif [[ -t 0 ]]; then
       read -q "REPLY?Use existing local branch? (y/N) "
       echo ""
       if [[ "$REPLY" != "y" && "$REPLY" != "Y" ]]; then
         return 1
       fi
-      is_remote=0
-      branch="$branch_name"
+    else
+      # No TTY (agent shell): reuse only if local and remote have not diverged
+      local local_sha remote_sha
+      local_sha="$(git rev-parse "refs/heads/$branch_name")"
+      remote_sha="$(git rev-parse "refs/remotes/$branch")"
+      if [[ "$local_sha" == "$remote_sha" ]]; then
+        echo "Reusing local branch '$branch_name' (same commit as $branch)."
+      elif git merge-base --is-ancestor "$local_sha" "$remote_sha"; then
+        echo "Reusing local branch '$branch_name' (behind $branch, no divergence — fast-forward with: git merge --ff-only $branch)."
+      elif git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+        echo "Reusing local branch '$branch_name' (ahead of $branch, no divergence)."
+      else
+        echo "Error: local branch '$branch_name' (${local_sha[1,8]}) has diverged from $branch (${remote_sha[1,8]})."
+        echo "Reconcile them first, or rerun with -y to reuse the local branch as-is."
+        return 1
+      fi
     fi
+    is_remote=0
+    branch="$branch_name"
   fi
   
   # Determine worktree directory name
@@ -142,6 +208,7 @@ gwt() {
 
   # Worktrees carry only tracked files — copy env files etc. from this worktree
   gwt_bootstrap "$repo_root" "$worktree_path"
+  gwt_workspace_hint "$worktree_path"
 }
 
 # Zsh completion for gwt (includes both local and remote branches)
