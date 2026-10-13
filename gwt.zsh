@@ -21,17 +21,11 @@
 gwt_bootstrap() {
   emulate -L zsh
   local src="$1" dst="$2"
-  local rel sm copied=0 skipped=0
-  local -a submodules
-  # `git submodule status` lines: "<flag><sha> <path> [(<describe>)]"
-  submodules=(${(f)"$(git -C "$src" submodule status 2>/dev/null | awk '{print $2}')"})
+  local rel copied=0 skipped=0
 
   while IFS= read -r -d '' rel; do
     [[ -z "$rel" || "$rel" == */ ]] && continue          # nested repos are listed as "dir/"
     [[ "$rel" == .claude/worktrees/* || "$rel" == */.claude/worktrees/* ]] && continue
-    for sm in "${submodules[@]}"; do
-      [[ -n "$sm" && ( "$rel" == "$sm" || "$rel" == "$sm"/* ) ]] && continue 2
-    done
     [[ "${rel:t}" == .env* || "${rel:t}" == .dev.vars* ]] || continue
     [[ "${rel:t}" == *.example ]] && continue
     [[ -f "$src/$rel" ]] || continue
@@ -115,10 +109,12 @@ gwt() {
     return 1
   }
   
-  # Get repository parent directory and name
-  local parent_dir repo_name
-  parent_dir="$(dirname "$repo_root")"
-  repo_name="$(basename "$repo_root")"
+  # Name and place new worktrees after the MAIN worktree (first entry of the
+  # list), so running gwt from a linked worktree doesn't nest names
+  local main_root parent_dir repo_name
+  main_root="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
+  parent_dir="$(dirname "$main_root")"
+  repo_name="$(basename "$main_root")"
   
   # Determine if it's a remote or local branch by checking which ref exists.
   # Local branches can contain slashes (e.g. fix/foo), so a slash alone does
@@ -214,16 +210,10 @@ gwt() {
 # Zsh completion for gwt (includes both local and remote branches)
 _gwt() {
   local -a branches
-  
-  # Get remote branches (strip leading spaces)
-  branches=(${(f)"$(git branch -r 2>/dev/null | sed 's/^ *//' | grep -v HEAD)"})
-  
-  # Get local branches (strip leading spaces and current branch indicator)
-  branches+=(${(f)"$(git branch 2>/dev/null | sed 's/^[* ] //' | grep -v HEAD)"})
-  
-  # Remove duplicates (in case a branch exists both locally and remotely)
-  branches=(${(u)branches})
-  
+  # Local and remote branches, minus the origin/HEAD symref. (`git branch` marks
+  # branches checked out in other worktrees with "+ ", which showed up as junk.)
+  branches=(${${${(f)"$(git for-each-ref --format='%(refname)' refs/heads refs/remotes 2>/dev/null)"}:#*/HEAD}#refs/(heads|remotes)/})
+
   _describe 'branch' branches
 }
 
@@ -253,6 +243,7 @@ gwtc() {
       -y|--yes) yes=1 ;;
       -F|--force) force=1 ;;
       -b|--base)
+        (( $# >= 2 )) || { echo "Error: $1 needs a branch name" >&2; return 2; }
         base="$2"
         shift
         ;;
@@ -271,128 +262,66 @@ gwtc() {
     return 1
   }
 
-  local current_toplevel current_branch
+  local current_toplevel
   current_toplevel="$(git rev-parse --show-toplevel)" || return 1
-  current_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || {
-    echo "Error: detached HEAD. Use: gwtc --base <branch>" >&2
-    return 1
-  }
 
-  [[ -z "$base" ]] && base="$current_branch"
+  # Default base = current branch; only a detached HEAD needs an explicit --base
+  if [[ -z "$base" ]]; then
+    base="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || {
+      echo "Error: detached HEAD. Use: gwtc --base <branch>" >&2
+      return 1
+    }
+  fi
 
   git rev-parse -q --verify "$base" >/dev/null 2>&1 || {
     echo "Error: base '$base' does not resolve to a commit/ref" >&2
     return 1
   }
 
-  local -a rm_paths rm_branches
-  local -a skip_dirty_paths skip_dirty_branches
-  local -a skip_bad_paths skip_bad_branches
+  local -a rm_paths rm_branches skip_dirty_paths skip_dirty_branches skip_bad_paths skip_bad_branches
+  local wt_path="" wt_branch_ref="" wt_locked=0 wt_prunable=0 line="" b st i
+  local main_worktree  # first entry of `git worktree list` is always the main one
+  main_worktree="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
 
-  local wt_path="" wt_branch_ref="" wt_locked=0 wt_prunable=0 line=""
-
-  flush_entry() {
-    if [[ -n "$wt_path" && -n "$wt_branch_ref" && "$wt_branch_ref" == refs/heads/* ]]; then
-      local b="${wt_branch_ref#refs/heads/}"
-
-      # Never remove the worktree you're currently in
-      if [[ "$wt_path" == "$current_toplevel" ]]; then
-        wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
-        return
-      fi
-
-      # Don’t remove base branch worktree
-      if [[ "$b" == "$base" ]]; then
-        wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
-        return
-      fi
-
-      # Only consider it if the worktree branch tip is merged into base
-      if git merge-base --is-ancestor "$wt_branch_ref" "$base" >/dev/null 2>&1; then
-        # Skip locked/prunable/unverifiable entries (safe default)
-        if (( wt_locked == 1 || wt_prunable == 1 )); then
-          skip_bad_paths+=("$wt_path")
-          skip_bad_branches+=("$b")
-          wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
-          return
-        fi
-
-        # Verify we can run git in that worktree and check dirtiness
-        if ! git -C "$wt_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-          skip_bad_paths+=("$wt_path")
-          skip_bad_branches+=("$b")
-          wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
-          return
-        fi
-
-        local st
-        st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st="__FAILED__"
-
-        if [[ "$st" != "" && "$st" != "__FAILED__" ]]; then
-          # dirty
-          if (( include_dirty == 0 )); then
-            skip_dirty_paths+=("$wt_path")
-            skip_dirty_branches+=("$b")
-          else
-            rm_paths+=("$wt_path")
-            rm_branches+=("$b")
-          fi
-        elif [[ "$st" == "__FAILED__" ]]; then
-          skip_bad_paths+=("$wt_path")
-          skip_bad_branches+=("$b")
-        else
-          # clean
-          rm_paths+=("$wt_path")
-          rm_branches+=("$b")
-        fi
-      fi
-    fi
-
-    wt_path=""
-    wt_branch_ref=""
-    wt_locked=0
-    wt_prunable=0
-  }
-
+  # Porcelain entries are separated by a blank line; classify one per blank line
   while IFS= read -r line; do
-    if [[ -z "$line" ]]; then
-      flush_entry
-      continue
-    fi
-
     case "$line" in
       worktree\ *) wt_path="${line#worktree }" ;;
       branch\ *) wt_branch_ref="${line#branch }" ;;
       locked*) wt_locked=1 ;;
       prunable*) wt_prunable=1 ;;
+      "")
+        b="${wt_branch_ref#refs/heads/}"
+        if [[ "$wt_branch_ref" != refs/heads/* ]]; then
+          :  # detached HEAD or bare entry: nothing to do
+        elif [[ "$wt_path" == "$current_toplevel" || "$wt_path" == "$main_worktree" || "$b" == "$base" ]]; then
+          :  # never remove the current worktree, the main worktree or the base branch's
+        elif ! git merge-base --is-ancestor "$wt_branch_ref" "$base" >/dev/null 2>&1; then
+          :  # not merged into base
+        elif (( wt_locked || wt_prunable )) || ! st="$(git -C "$wt_path" status --porcelain 2>/dev/null)"; then
+          # locked/prunable/unverifiable: safe default is to skip
+          skip_bad_paths+=("$wt_path")
+          skip_bad_branches+=("$b")
+        elif [[ -n "$st" ]] && (( include_dirty == 0 )); then
+          skip_dirty_paths+=("$wt_path")
+          skip_dirty_branches+=("$b")
+        else
+          rm_paths+=("$wt_path")
+          rm_branches+=("$b")
+        fi
+        wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
+        ;;
     esac
   done < <({ git worktree list --porcelain; echo; } 2>/dev/null)
 
-  if (( ${#rm_paths} == 0 )); then
+  if (( ${#rm_paths} > 0 )); then
+    echo "Will remove merged worktrees (base: '$base'):"
+    for (( i = 1; i <= ${#rm_paths}; i++ )); do
+      echo "  - ${rm_paths[$i]} (branch: ${rm_branches[$i]})"
+    done
+  else
     echo "No removable merged worktrees found (base: '$base')."
-    if (( ${#skip_dirty_paths} > 0 )); then
-      echo "Skipped (dirty):"
-      local i
-      for (( i = 1; i <= ${#skip_dirty_paths}; i++ )); do
-        echo "  - ${skip_dirty_paths[$i]} (branch: ${skip_dirty_branches[$i]})"
-      done
-    fi
-    if (( ${#skip_bad_paths} > 0 )); then
-      echo "Skipped (locked/prunable/unverifiable):"
-      local i
-      for (( i = 1; i <= ${#skip_bad_paths}; i++ )); do
-        echo "  - ${skip_bad_paths[$i]} (branch: ${skip_bad_branches[$i]})"
-      done
-      echo "Tip: run `git worktree prune` to clean up prunable/stale entries."
-    fi
-    return 0
   fi
-
-  echo "Will remove merged worktrees (base: '$base'):"
-  local i
-  for (( i = 1; i <= ${#rm_paths}; i++ )); do
-    echo "  - ${rm_paths[$i]} (branch: ${rm_branches[$i]})"
-  done
 
   if (( ${#skip_dirty_paths} > 0 )); then
     echo "Skipped (dirty):"
@@ -402,9 +331,15 @@ gwtc() {
     echo "Use --include-dirty (and usually -F) if you really want to remove them."
   fi
 
-  if (( dry == 1 )); then
-    return 0
+  if (( ${#skip_bad_paths} > 0 )); then
+    echo "Skipped (locked/prunable/unverifiable):"
+    for (( i = 1; i <= ${#skip_bad_paths}; i++ )); do
+      echo "  - ${skip_bad_paths[$i]} (branch: ${skip_bad_branches[$i]})"
+    done
+    echo "Tip: run 'git worktree prune' to clean up prunable/stale entries."
   fi
+
+  (( dry == 1 || ${#rm_paths} == 0 )) && return 0
 
   if (( yes == 0 )); then
     echo ""
@@ -427,7 +362,8 @@ gwtc() {
     fi
 
     if (( delete_branch == 1 )); then
-      git branch -d -- "${rm_branches[$i]}" >/dev/null 2>&1 || true
+      # -D: merged into $base is already verified above; -d would check HEAD instead
+      git branch -D -- "${rm_branches[$i]}" >/dev/null || failed=1
     fi
   done
 
@@ -457,29 +393,21 @@ gws() {
     return 1
   }
   
-  # Calculate relative path from current worktree root
-  local rel_path=""
-  if [[ "$PWD" != "$current_root" ]]; then
-    rel_path="${PWD#$current_root/}"
-  fi
+  # Relative path from the worktree root ("" at the root, else "sub/dir/");
+  # unlike stripping $PWD it also works through symlinked paths
+  local rel_path
+  rel_path="$(git rev-parse --show-prefix)"
   
-  # Find target worktree path by branch name
-  local target_path=""
-  
-  # Try exact match
-  target_path="$(git worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$branch" '
-    $1 == "worktree" { path = $2 }
-    $1 == "branch" && $2 == b { print path; exit }
-  ')"
-  
-  # If not found and looks like remote/branch, try stripping the remote prefix
-  if [[ -z "$target_path" && "$branch" == */* ]]; then
-    local short_branch="${branch#*/}"
-    target_path="$(git worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$short_branch" '
-      $1 == "worktree" { path = $2 }
-      $1 == "branch" && $2 == b { print path; exit }
+  # Find target worktree path by branch name; for "origin/foo" retry as "foo".
+  # Take the path as the whole line after "worktree " so spaces survive.
+  local target_path="" b
+  for b in "$branch" "${branch#*/}"; do
+    target_path="$(git worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$b" '
+      /^worktree / { path = substr($0, 10) }
+      $0 == "branch " b { print path; exit }
     ')"
-  fi
+    [[ -n "$target_path" ]] && break
+  done
   
   if [[ -z "$target_path" ]]; then
     echo "Error: No worktree found for branch '$branch'"
@@ -501,7 +429,7 @@ gws() {
     if [[ -d "$target_path/$rel_path" ]]; then
       dest="$target_path/$rel_path"
     else
-      echo "Note: './$rel_path' not found in target, landing at worktree root"
+      echo "Note: './${rel_path%/}' not found in target, landing at worktree root"
     fi
   fi
   

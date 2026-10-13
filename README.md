@@ -74,6 +74,11 @@ gws origin/hotfix      # Works with remote prefix too
 This directory is its own git repo (not part of `~/Scripts`, which isn't
 versioned) so changes to these helpers have history.
 
+## Tests
+
+`zsh test.zsh` runs smoke tests against throwaway repos in a temp dir (no real
+repo or git config is touched).
+
 ## GOTCHA: no underscore-prefixed functions callable at runtime
 
 Claude Code snapshots the interactive shell into
