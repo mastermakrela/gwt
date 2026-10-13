@@ -210,16 +210,10 @@ gwt() {
 # Zsh completion for gwt (includes both local and remote branches)
 _gwt() {
   local -a branches
-  
-  # Get remote branches (strip leading spaces)
-  branches=(${(f)"$(git branch -r 2>/dev/null | sed 's/^ *//' | grep -v HEAD)"})
-  
-  # Get local branches (strip leading spaces and current branch indicator)
-  branches+=(${(f)"$(git branch 2>/dev/null | sed 's/^[* ] //' | grep -v HEAD)"})
-  
-  # Remove duplicates (in case a branch exists both locally and remotely)
-  branches=(${(u)branches})
-  
+  # Local and remote branches, minus the origin/HEAD symref. (`git branch` marks
+  # branches checked out in other worktrees with "+ ", which showed up as junk.)
+  branches=(${${${(f)"$(git for-each-ref --format='%(refname)' refs/heads refs/remotes 2>/dev/null)"}:#*/HEAD}#refs/(heads|remotes)/})
+
   _describe 'branch' branches
 }
 
