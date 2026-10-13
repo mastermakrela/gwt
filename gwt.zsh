@@ -427,7 +427,8 @@ gwtc() {
     fi
 
     if (( delete_branch == 1 )); then
-      git branch -d -- "${rm_branches[$i]}" >/dev/null 2>&1 || true
+      # -D: merged into $base is already verified above; -d would check HEAD instead
+      git branch -D -- "${rm_branches[$i]}" >/dev/null || failed=1
     fi
   done
 
