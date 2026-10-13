@@ -290,13 +290,15 @@ gwtc() {
   local -a skip_bad_paths skip_bad_branches
 
   local wt_path="" wt_branch_ref="" wt_locked=0 wt_prunable=0 line=""
+  local main_worktree  # first entry of `git worktree list` is always the main one
+  main_worktree="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
 
   flush_entry() {
     if [[ -n "$wt_path" && -n "$wt_branch_ref" && "$wt_branch_ref" == refs/heads/* ]]; then
       local b="${wt_branch_ref#refs/heads/}"
 
-      # Never remove the worktree you're currently in
-      if [[ "$wt_path" == "$current_toplevel" ]]; then
+      # Never remove the worktree you're currently in, or the main worktree
+      if [[ "$wt_path" == "$current_toplevel" || "$wt_path" == "$main_worktree" ]]; then
         wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
         return
       fi
