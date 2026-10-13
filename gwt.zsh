@@ -21,17 +21,11 @@
 gwt_bootstrap() {
   emulate -L zsh
   local src="$1" dst="$2"
-  local rel sm copied=0 skipped=0
-  local -a submodules
-  # `git submodule status` lines: "<flag><sha> <path> [(<describe>)]"
-  submodules=(${(f)"$(git -C "$src" submodule status 2>/dev/null | awk '{print $2}')"})
+  local rel copied=0 skipped=0
 
   while IFS= read -r -d '' rel; do
     [[ -z "$rel" || "$rel" == */ ]] && continue          # nested repos are listed as "dir/"
     [[ "$rel" == .claude/worktrees/* || "$rel" == */.claude/worktrees/* ]] && continue
-    for sm in "${submodules[@]}"; do
-      [[ -n "$sm" && ( "$rel" == "$sm" || "$rel" == "$sm"/* ) ]] && continue 2
-    done
     [[ "${rel:t}" == .env* || "${rel:t}" == .dev.vars* ]] || continue
     [[ "${rel:t}" == *.example ]] && continue
     [[ -f "$src/$rel" ]] || continue
