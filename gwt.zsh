@@ -255,6 +255,7 @@ gwtc() {
       -y|--yes) yes=1 ;;
       -F|--force) force=1 ;;
       -b|--base)
+        (( $# >= 2 )) || { echo "Error: $1 needs a branch name" >&2; return 2; }
         base="$2"
         shift
         ;;
