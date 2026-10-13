@@ -460,29 +460,21 @@ gws() {
     return 1
   }
   
-  # Calculate relative path from current worktree root
-  local rel_path=""
-  if [[ "$PWD" != "$current_root" ]]; then
-    rel_path="${PWD#$current_root/}"
-  fi
+  # Relative path from the worktree root ("" at the root, else "sub/dir/");
+  # unlike stripping $PWD it also works through symlinked paths
+  local rel_path
+  rel_path="$(git rev-parse --show-prefix)"
   
-  # Find target worktree path by branch name
-  local target_path=""
-  
-  # Try exact match
-  target_path="$(git worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$branch" '
-    $1 == "worktree" { path = $2 }
-    $1 == "branch" && $2 == b { print path; exit }
-  ')"
-  
-  # If not found and looks like remote/branch, try stripping the remote prefix
-  if [[ -z "$target_path" && "$branch" == */* ]]; then
-    local short_branch="${branch#*/}"
-    target_path="$(git worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$short_branch" '
-      $1 == "worktree" { path = $2 }
-      $1 == "branch" && $2 == b { print path; exit }
+  # Find target worktree path by branch name; for "origin/foo" retry as "foo".
+  # Take the path as the whole line after "worktree " so spaces survive.
+  local target_path="" b
+  for b in "$branch" "${branch#*/}"; do
+    target_path="$(git worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$b" '
+      /^worktree / { path = substr($0, 10) }
+      $0 == "branch " b { print path; exit }
     ')"
-  fi
+    [[ -n "$target_path" ]] && break
+  done
   
   if [[ -z "$target_path" ]]; then
     echo "Error: No worktree found for branch '$branch'"
@@ -504,7 +496,7 @@ gws() {
     if [[ -d "$target_path/$rel_path" ]]; then
       dest="$target_path/$rel_path"
     else
-      echo "Note: './$rel_path' not found in target, landing at worktree root"
+      echo "Note: './${rel_path%/}' not found in target, landing at worktree root"
     fi
   fi
   
