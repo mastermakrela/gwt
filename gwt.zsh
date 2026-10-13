@@ -115,10 +115,12 @@ gwt() {
     return 1
   }
   
-  # Get repository parent directory and name
-  local parent_dir repo_name
-  parent_dir="$(dirname "$repo_root")"
-  repo_name="$(basename "$repo_root")"
+  # Name and place new worktrees after the MAIN worktree (first entry of the
+  # list), so running gwt from a linked worktree doesn't nest names
+  local main_root parent_dir repo_name
+  main_root="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
+  parent_dir="$(dirname "$main_root")"
+  repo_name="$(basename "$main_root")"
   
   # Determine if it's a remote or local branch by checking which ref exists.
   # Local branches can contain slashes (e.g. fix/foo), so a slash alone does
