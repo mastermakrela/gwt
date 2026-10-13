@@ -273,14 +273,16 @@ gwtc() {
     return 1
   }
 
-  local current_toplevel current_branch
+  local current_toplevel
   current_toplevel="$(git rev-parse --show-toplevel)" || return 1
-  current_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || {
-    echo "Error: detached HEAD. Use: gwtc --base <branch>" >&2
-    return 1
-  }
 
-  [[ -z "$base" ]] && base="$current_branch"
+  # Default base = current branch; only a detached HEAD needs an explicit --base
+  if [[ -z "$base" ]]; then
+    base="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || {
+      echo "Error: detached HEAD. Use: gwtc --base <branch>" >&2
+      return 1
+    }
+  fi
 
   git rev-parse -q --verify "$base" >/dev/null 2>&1 || {
     echo "Error: base '$base' does not resolve to a commit/ref" >&2
