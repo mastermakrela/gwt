@@ -290,116 +290,50 @@ gwtc() {
     return 1
   }
 
-  local -a rm_paths rm_branches
-  local -a skip_dirty_paths skip_dirty_branches
-  local -a skip_bad_paths skip_bad_branches
-
-  local wt_path="" wt_branch_ref="" wt_locked=0 wt_prunable=0 line=""
+  local -a rm_paths rm_branches skip_dirty_paths skip_dirty_branches skip_bad_paths skip_bad_branches
+  local wt_path="" wt_branch_ref="" wt_locked=0 wt_prunable=0 line="" b st i
   local main_worktree  # first entry of `git worktree list` is always the main one
   main_worktree="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
 
-  flush_entry() {
-    if [[ -n "$wt_path" && -n "$wt_branch_ref" && "$wt_branch_ref" == refs/heads/* ]]; then
-      local b="${wt_branch_ref#refs/heads/}"
-
-      # Never remove the worktree you're currently in, or the main worktree
-      if [[ "$wt_path" == "$current_toplevel" || "$wt_path" == "$main_worktree" ]]; then
-        wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
-        return
-      fi
-
-      # Don’t remove base branch worktree
-      if [[ "$b" == "$base" ]]; then
-        wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
-        return
-      fi
-
-      # Only consider it if the worktree branch tip is merged into base
-      if git merge-base --is-ancestor "$wt_branch_ref" "$base" >/dev/null 2>&1; then
-        # Skip locked/prunable/unverifiable entries (safe default)
-        if (( wt_locked == 1 || wt_prunable == 1 )); then
-          skip_bad_paths+=("$wt_path")
-          skip_bad_branches+=("$b")
-          wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
-          return
-        fi
-
-        # Verify we can run git in that worktree and check dirtiness
-        if ! git -C "$wt_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-          skip_bad_paths+=("$wt_path")
-          skip_bad_branches+=("$b")
-          wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
-          return
-        fi
-
-        local st
-        st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st="__FAILED__"
-
-        if [[ "$st" != "" && "$st" != "__FAILED__" ]]; then
-          # dirty
-          if (( include_dirty == 0 )); then
-            skip_dirty_paths+=("$wt_path")
-            skip_dirty_branches+=("$b")
-          else
-            rm_paths+=("$wt_path")
-            rm_branches+=("$b")
-          fi
-        elif [[ "$st" == "__FAILED__" ]]; then
-          skip_bad_paths+=("$wt_path")
-          skip_bad_branches+=("$b")
-        else
-          # clean
-          rm_paths+=("$wt_path")
-          rm_branches+=("$b")
-        fi
-      fi
-    fi
-
-    wt_path=""
-    wt_branch_ref=""
-    wt_locked=0
-    wt_prunable=0
-  }
-
+  # Porcelain entries are separated by a blank line; classify one per blank line
   while IFS= read -r line; do
-    if [[ -z "$line" ]]; then
-      flush_entry
-      continue
-    fi
-
     case "$line" in
       worktree\ *) wt_path="${line#worktree }" ;;
       branch\ *) wt_branch_ref="${line#branch }" ;;
       locked*) wt_locked=1 ;;
       prunable*) wt_prunable=1 ;;
+      "")
+        b="${wt_branch_ref#refs/heads/}"
+        if [[ "$wt_branch_ref" != refs/heads/* ]]; then
+          :  # detached HEAD or bare entry: nothing to do
+        elif [[ "$wt_path" == "$current_toplevel" || "$wt_path" == "$main_worktree" || "$b" == "$base" ]]; then
+          :  # never remove the current worktree, the main worktree or the base branch's
+        elif ! git merge-base --is-ancestor "$wt_branch_ref" "$base" >/dev/null 2>&1; then
+          :  # not merged into base
+        elif (( wt_locked || wt_prunable )) || ! st="$(git -C "$wt_path" status --porcelain 2>/dev/null)"; then
+          # locked/prunable/unverifiable: safe default is to skip
+          skip_bad_paths+=("$wt_path")
+          skip_bad_branches+=("$b")
+        elif [[ -n "$st" ]] && (( include_dirty == 0 )); then
+          skip_dirty_paths+=("$wt_path")
+          skip_dirty_branches+=("$b")
+        else
+          rm_paths+=("$wt_path")
+          rm_branches+=("$b")
+        fi
+        wt_path=""; wt_branch_ref=""; wt_locked=0; wt_prunable=0
+        ;;
     esac
   done < <({ git worktree list --porcelain; echo; } 2>/dev/null)
 
-  if (( ${#rm_paths} == 0 )); then
+  if (( ${#rm_paths} > 0 )); then
+    echo "Will remove merged worktrees (base: '$base'):"
+    for (( i = 1; i <= ${#rm_paths}; i++ )); do
+      echo "  - ${rm_paths[$i]} (branch: ${rm_branches[$i]})"
+    done
+  else
     echo "No removable merged worktrees found (base: '$base')."
-    if (( ${#skip_dirty_paths} > 0 )); then
-      echo "Skipped (dirty):"
-      local i
-      for (( i = 1; i <= ${#skip_dirty_paths}; i++ )); do
-        echo "  - ${skip_dirty_paths[$i]} (branch: ${skip_dirty_branches[$i]})"
-      done
-    fi
-    if (( ${#skip_bad_paths} > 0 )); then
-      echo "Skipped (locked/prunable/unverifiable):"
-      local i
-      for (( i = 1; i <= ${#skip_bad_paths}; i++ )); do
-        echo "  - ${skip_bad_paths[$i]} (branch: ${skip_bad_branches[$i]})"
-      done
-      echo "Tip: run 'git worktree prune' to clean up prunable/stale entries."
-    fi
-    return 0
   fi
-
-  echo "Will remove merged worktrees (base: '$base'):"
-  local i
-  for (( i = 1; i <= ${#rm_paths}; i++ )); do
-    echo "  - ${rm_paths[$i]} (branch: ${rm_branches[$i]})"
-  done
 
   if (( ${#skip_dirty_paths} > 0 )); then
     echo "Skipped (dirty):"
@@ -409,9 +343,15 @@ gwtc() {
     echo "Use --include-dirty (and usually -F) if you really want to remove them."
   fi
 
-  if (( dry == 1 )); then
-    return 0
+  if (( ${#skip_bad_paths} > 0 )); then
+    echo "Skipped (locked/prunable/unverifiable):"
+    for (( i = 1; i <= ${#skip_bad_paths}; i++ )); do
+      echo "  - ${skip_bad_paths[$i]} (branch: ${skip_bad_branches[$i]})"
+    done
+    echo "Tip: run 'git worktree prune' to clean up prunable/stale entries."
   fi
+
+  (( dry == 1 || ${#rm_paths} == 0 )) && return 0
 
   if (( yes == 0 )); then
     echo ""
