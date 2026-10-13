@@ -383,7 +383,7 @@ gwtc() {
       for (( i = 1; i <= ${#skip_bad_paths}; i++ )); do
         echo "  - ${skip_bad_paths[$i]} (branch: ${skip_bad_branches[$i]})"
       done
-      echo "Tip: run `git worktree prune` to clean up prunable/stale entries."
+      echo "Tip: run 'git worktree prune' to clean up prunable/stale entries."
     fi
     return 0
   fi
