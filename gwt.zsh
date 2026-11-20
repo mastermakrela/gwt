@@ -9,7 +9,9 @@
 # directly by this script.
 #
 # gwt bootstraps every new worktree: worktrees carry only tracked files, so
-# gitignored .env* / .dev.vars* files are copied over from the source worktree.
+# gitignored .env* / .dev.vars* files and Android signing files (key.properties,
+# *.jks, *.keystore) are copied over from the source worktree, and submodules
+# listed in .gitmodules are initialised.
 # They are enumerated with `git ls-files --others --ignored`, which never lists
 # tracked templates and never descends into submodules or nested checkouts
 # (.claude/worktrees/agent-*); *.example files are skipped, and a file is only
@@ -32,7 +34,7 @@ gwt_bootstrap() {
     for sm in "${submodules[@]}"; do
       [[ -n "$sm" && ( "$rel" == "$sm" || "$rel" == "$sm"/* ) ]] && continue 2
     done
-    [[ "${rel:t}" == .env* || "${rel:t}" == .dev.vars* ]] || continue
+    [[ "${rel:t}" == (.env*|.dev.vars*|key.properties|*.jks|*.keystore) ]] || continue
     [[ "${rel:t}" == *.example ]] && continue
     [[ -f "$src/$rel" ]] || continue
     [[ -e "$dst/$rel" ]] && continue
@@ -61,8 +63,14 @@ gwt_bootstrap() {
     fi
   fi
 
-  echo "Note: gwt only copied env files/secrets — it does NOT install deps, init submodules, or run codegen."
-  echo "If the repo needs them: bun install / fvm flutter pub get, git submodule update --init, svelte-kit sync / wrangler types / paraglide compile."
+  if [[ -f "$dst/.gitmodules" ]]; then
+    echo "Initialising submodules:"
+    git -C "$dst" submodule update --init --recursive || \
+      echo "  submodule init failed — run: git -C '$dst' submodule update --init --recursive"
+  fi
+
+  echo "Note: gwt copied env/signing files and initialised submodules — it does NOT install deps or run codegen."
+  echo "If the repo needs them: bun install / fvm flutter pub get, svelte-kit sync / wrangler types / paraglide compile / build_runner."
 }
 
 # If the worktree root has no package.json/pubspec.yaml/pyproject.toml but exactly
@@ -115,10 +123,13 @@ gwt() {
     return 1
   }
   
-  # Get repository parent directory and name
-  local parent_dir repo_name
-  parent_dir="$(dirname "$repo_root")"
-  repo_name="$(basename "$repo_root")"
+  # Name the sibling after the MAIN worktree, so gwt run from a linked worktree
+  # doesn't produce <repo>-<branch-a>-<branch-b>
+  local parent_dir repo_name main_root
+  main_root="$(git worktree list --porcelain | awk 'NR==1 { print substr($0, 10) }')"
+  [[ -d "$main_root" ]] || main_root="$repo_root"
+  parent_dir="$(dirname "$main_root")"
+  repo_name="$(basename "$main_root")"
   
   # Determine if it's a remote or local branch by checking which ref exists.
   # Local branches can contain slashes (e.g. fix/foo), so a slash alone does
@@ -233,6 +244,15 @@ _gwt() {
 # aborts the rest of this file (gwtc/gws never get defined).
 (( $+functions[compdef] && $+_comps )) && compdef _gwt gwt
 
+# Squash- or rebase-merged: merging the branch into base would change nothing.
+# Purely local, so a branch that was never pushed is only matched when its
+# content really is in base.
+gwt_content_merged() {
+  local tree
+  tree="$(git merge-tree --write-tree "$2" "$1" 2>/dev/null)" || return 1
+  [[ "$tree" == "$(git rev-parse "$2^{tree}")" ]]
+}
+
 # Cleanup merged worktrees, but protect worktrees with uncommitted changes
 #
 # Options:
@@ -307,8 +327,9 @@ gwtc() {
         return
       fi
 
-      # Only consider it if the worktree branch tip is merged into base
-      if git merge-base --is-ancestor "$wt_branch_ref" "$base" >/dev/null 2>&1; then
+      # Only consider it if the worktree branch is merged into base
+      if git merge-base --is-ancestor "$wt_branch_ref" "$base" >/dev/null 2>&1 \
+        || gwt_content_merged "$wt_branch_ref" "$base"; then
         # Skip locked/prunable/unverifiable entries (safe default)
         if (( wt_locked == 1 || wt_prunable == 1 )); then
           skip_bad_paths+=("$wt_path")
@@ -420,14 +441,21 @@ gwtc() {
   local failed=0
   for (( i = 1; i <= ${#rm_paths}; i++ )); do
     echo "Removing worktree: ${rm_paths[$i]}"
-    if ! git "${rm_args[@]}" -- "${rm_paths[$i]}"; then
+    # git refuses to remove a worktree with initialised submodules unless forced;
+    # it is only in this list because it was found clean (or --include-dirty)
+    local -a sm_force=()
+    [[ -f "${rm_paths[$i]}/.gitmodules" ]] && sm_force=(--force)
+    if ! git "${rm_args[@]}" "${sm_force[@]}" -- "${rm_paths[$i]}"; then
       echo "  Failed. Try: git worktree remove --force -- '${rm_paths[$i]}'" >&2
       failed=1
       continue
     fi
 
     if (( delete_branch == 1 )); then
-      git branch -d -- "${rm_branches[$i]}" >/dev/null 2>&1 || true
+      # -d refuses a squash-merged branch (its tip is not an ancestor of base)
+      git branch -d -- "${rm_branches[$i]}" >/dev/null 2>&1 \
+        || { gwt_content_merged "refs/heads/${rm_branches[$i]}" "$base" \
+             && git branch -D -- "${rm_branches[$i]}" >/dev/null 2>&1; } || true
     fi
   done
 

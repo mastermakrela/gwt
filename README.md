@@ -21,14 +21,18 @@ gwt feature-branch           # Local branch, or origin/feature-branch if only on
 - If that local branch already exists: with `-y` it is reused; on a TTY you're
   prompted; without a TTY (agent shells) it is reused if it is at, behind, or
   ahead of the remote, and gwt aborts if the two have diverged.
+- The worktree is named after the main worktree's directory, also when gwt is
+  run from a linked worktree.
 - After creating the worktree, `gwt_bootstrap` runs automatically: it copies
-  gitignored `.env*` / `.dev.vars*` files from the source worktree (via
+  gitignored `.env*` / `.dev.vars*` files and Android signing files
+  (`key.properties`, `*.jks`, `*.keystore`) from the source worktree (via
   `git ls-files --others --ignored`, so tracked templates, submodules and nested
   checkouts like `.claude/worktrees/*` are never touched; `*.example` is
   skipped). A file is only copied if its directory exists on the new branch —
   otherwise it is listed as skipped. If the repo has a `secretspec.toml` and
   the `secretspec` CLI is installed, it runs `secretspec check` instead of/in
-  addition to relying on copied dotenv files.
+  addition to relying on copied dotenv files. Submodules listed in
+  `.gitmodules` are initialised (`git submodule update --init --recursive`).
 - If the root has no `package.json` / `pubspec.yaml` / `pyproject.toml` but
   exactly one subdirectory does, gwt prints where the workspace lives.
 - It does **not** install dependencies or run codegen — you still need
@@ -37,7 +41,9 @@ gwt feature-branch           # Local branch, or origin/feature-branch if only on
 ### `gwtc [-n|--dry-run] [-y|--yes] [-F|--force] [-b|--base <branch>] [--include-dirty] [--delete-branch]`
 
 Clean up worktrees whose branch is already merged into a base branch
-(default: the current branch), while protecting the current worktree, the
+(default: the current branch) — as an ancestor, or squash/rebase-merged
+(merging it into the base would change nothing; with `--delete-branch` such a
+branch is removed with `-D`) — while protecting the current worktree, the
 base branch's worktree, and any worktree with uncommitted changes.
 
 - `-n`, `--dry-run` — show what would be removed, do nothing.
